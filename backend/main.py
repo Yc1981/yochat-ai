@@ -10,7 +10,6 @@ load_dotenv()
 
 app = FastAPI(title="YoChat Live Teacher Backend")
 
-# Configure CORS
 allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",")]
 
 app.add_middleware(
@@ -22,7 +21,7 @@ app.add_middleware(
 )
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "models/gemini-2.0-flash-live-001")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "models/gemini-3.1-flash-live-preview")
 GEMINI_LIVE_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 
 
@@ -42,6 +41,7 @@ def health():
         "key_configured": bool(GEMINI_API_KEY),
         "model": GEMINI_MODEL,
         "api_version": "v1beta",
+        "live_schema": "current-websocket",
     }
 
 
@@ -52,8 +52,8 @@ async def websocket_endpoint(websocket: WebSocket):
     unit = query_params.get("unit", "Unit 1")
     lesson = query_params.get("lesson", "Lesson 1")
     scenario = query_params.get("scenario", "")
-    voice = query_params.get("voice", "Aoede")
-    teacher_name = query_params.get("teacherName", "Ons")
+    voice = query_params.get("voice", "Puck")
+    teacher_name = query_params.get("teacherName", "Yamen")
 
     await websocket.accept()
 
@@ -83,21 +83,20 @@ async def websocket_endpoint(websocket: WebSocket):
         "Do not give long explanations. Keep the conversation oral and interactive."
     )
 
-    gemini_config = {
+    # Current Gemini Live WebSocket schema: responseModalities sits directly under setup.
+    setup_message = {
         "setup": {
             "model": GEMINI_MODEL,
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "speechConfig": {
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": {
-                            "voiceName": voice,
-                        }
-                    }
-                },
-            },
+            "responseModalities": ["AUDIO"],
             "systemInstruction": {
                 "parts": [{"text": system_instruction}],
+            },
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": voice,
+                    }
+                }
             },
         }
     }
@@ -105,8 +104,8 @@ async def websocket_endpoint(websocket: WebSocket):
     uri = f"{GEMINI_LIVE_URL}?key={GEMINI_API_KEY}"
 
     try:
-        async with websockets.connect(uri, ping_interval=20, ping_timeout=20) as gemini_ws:
-            await gemini_ws.send(json.dumps(gemini_config))
+        async with websockets.connect(uri, ping_interval=20, ping_timeout=20, max_size=None) as gemini_ws:
+            await gemini_ws.send(json.dumps(setup_message))
             print(f"Sent Gemini Live setup config. Model: {GEMINI_MODEL}")
 
             setup_ready = False
@@ -137,14 +136,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         msg = json.loads(raw_data)
 
                         if msg.get("type") == "audio" and msg.get("data"):
+                            # Current Gemini Live schema: realtimeInput.audio, not mediaChunks.
                             audio_payload = {
                                 "realtimeInput": {
-                                    "mediaChunks": [
-                                        {
-                                            "data": msg["data"],
-                                            "mimeType": "audio/pcm;rate=16000",
-                                        }
-                                    ]
+                                    "audio": {
+                                        "data": msg["data"],
+                                        "mimeType": "audio/pcm;rate=16000",
+                                    }
                                 }
                             }
                             await gemini_ws.send(json.dumps(audio_payload))
@@ -159,15 +157,23 @@ async def websocket_endpoint(websocket: WebSocket):
                         response = json.loads(raw_response)
                         print(f"Gemini response keys: {list(response.keys())}")
 
+                        if "error" in response:
+                            await websocket.send_json({
+                                "type": "error",
+                                "message": f"Gemini error: {response['error']}",
+                            })
+                            continue
+
                         server_content = response.get("serverContent", {})
                         model_turn = server_content.get("modelTurn", {})
                         parts = model_turn.get("parts", [])
 
                         for part in parts:
-                            if "inlineData" in part and part["inlineData"].get("data"):
+                            inline_data = part.get("inlineData")
+                            if inline_data and inline_data.get("data"):
                                 await websocket.send_json({
                                     "type": "audio",
-                                    "data": part["inlineData"]["data"],
+                                    "data": inline_data["data"],
                                 })
 
                             if "text" in part:
@@ -175,6 +181,18 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "type": "text",
                                     "data": part["text"],
                                 })
+
+                        if "inputTranscription" in server_content:
+                            await websocket.send_json({
+                                "type": "text",
+                                "data": server_content["inputTranscription"].get("text", ""),
+                            })
+
+                        if "outputTranscription" in server_content:
+                            await websocket.send_json({
+                                "type": "text",
+                                "data": server_content["outputTranscription"].get("text", ""),
+                            })
 
                         if server_content.get("interrupted"):
                             await websocket.send_json({"type": "interrupted"})
