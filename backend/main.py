@@ -23,7 +23,7 @@ app.add_middleware(
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "models/gemini-2.0-flash-live-001")
-GEMINI_LIVE_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
+GEMINI_LIVE_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 
 
 @app.get("/")
@@ -41,6 +41,7 @@ def health():
         "status": "healthy",
         "key_configured": bool(GEMINI_API_KEY),
         "model": GEMINI_MODEL,
+        "api_version": "v1beta",
     }
 
 
@@ -108,7 +109,6 @@ async def websocket_endpoint(websocket: WebSocket):
             await gemini_ws.send(json.dumps(gemini_config))
             print(f"Sent Gemini Live setup config. Model: {GEMINI_MODEL}")
 
-            # Wait for Gemini to confirm the session before telling the frontend to start recording.
             setup_ready = False
             for _ in range(10):
                 raw_setup_response = await asyncio.wait_for(gemini_ws.recv(), timeout=10)
